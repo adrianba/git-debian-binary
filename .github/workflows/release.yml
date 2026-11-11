@@ -45,8 +45,8 @@ jobs:
           set -euxo pipefail
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential ca-certificates git gettext libcurl4-gnutls-dev \
-            liberror-perl libexpat1-dev libpcre2-dev libssl-dev perl zlib1g-dev
+            build-essential ca-certificates cargo git gettext libcurl4-gnutls-dev \
+            liberror-perl libexpat1-dev libpcre2-dev libssl-dev perl rustc zlib1g-dev
 
           git clone --depth 1 --branch "v${VERSION}" \
             https://github.com/git/git.git "$GITHUB_WORKSPACE/git-source"
@@ -61,6 +61,21 @@ jobs:
             prefix=/usr gitexecdir=/usr/lib/git-core \
             DESTDIR="$package" install
 
+          split_packages="$(mktemp -d)"
+          (
+            cd "$split_packages"
+            apt-get download git-cvs git-email git-mediawiki git-svn
+            for archive in ./*.deb; do
+              while IFS= read -r path; do
+                if [[ "$path" != */ ]]; then
+                  rm -f -- "$package/${path#./}"
+                fi
+              done < <(dpkg-deb --fsys-tarfile "$archive" | tar -tf -)
+            done
+          )
+          rm -rf "$package/usr/share/gitweb"
+          find "$package" -depth -type d -empty -delete
+
           mkdir -p "$package/DEBIAN" "$GITHUB_WORKSPACE/dist"
           cat > "$package/DEBIAN/control" <<EOF
           Package: git
@@ -69,7 +84,7 @@ jobs:
           Priority: optional
           Architecture: ${DEB_ARCH}
           Maintainer: git-debian-binary contributors
-          Depends: git-man, libc6 (>= 2.34), libcurl3t64-gnutls (>= 7.56.1), liberror-perl, libexpat1 (>= 2.0.1), libpcre2-8-0 (>= 10.34), libssl3t64, perl, zlib1g (>= 1:1.2.2)
+          Depends: git-man, libc6 (>= 2.38), libcurl3t64-gnutls (>= 7.56.1), liberror-perl, libexpat1 (>= 2.0.1), libpcre2-8-0 (>= 10.34), libssl3t64, perl, zlib1g (>= 1:1.2.2)
           Description: Fast, scalable, distributed revision control system
            Upstream Git built from source for Debian 13.
           EOF
@@ -89,7 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download packages
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: git-deb-*
           path: dist

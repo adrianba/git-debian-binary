@@ -14,9 +14,11 @@ assets for that version.
 
 The packages are named `git_<version>_<architecture>.deb`. They use the Debian
 package name `git` and a higher package version than Debian 13's stock package,
-so installing one upgrades that package and replaces its Git executable and
-support files. Debian's `git-man` package and the runtime libraries remain
-provided by Debian.
+so installing one upgrades that package and replaces its core Git executable
+and support files. Debian's `git-man` package and the runtime libraries remain
+provided by Debian. Optional integrations provided by split packages are not
+included; APT may remove packages such as `git-svn` because they require an
+exactly matching Debian Git version.
 
 Install the package for the machine's architecture with:
 
