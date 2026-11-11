@@ -1,0 +1,126 @@
+name: Build and release Git
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Find the latest stable Git release
+        id: release
+        shell: bash
+        run: |
+          tag="$(curl --fail --silent --show-error https://api.github.com/repos/git/git/releases/latest | jq --raw-output .tag_name)"
+          if [[ ! "$tag" =~ ^v[0-9]+(\.[0-9]+)+$ ]]; then
+            echo "Unexpected upstream release tag: $tag" >&2
+            exit 1
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: debian:13
+    steps:
+      - name: Build Debian package
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          DEB_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cargo git gettext libcurl4-gnutls-dev \
+            liberror-perl libexpat1-dev libpcre2-dev libssl-dev perl rustc zlib1g-dev
+
+          git clone --depth 1 --branch "v${VERSION}" \
+            https://github.com/git/git.git "$GITHUB_WORKSPACE/git-source"
+          make -C "$GITHUB_WORKSPACE/git-source" -j"$(nproc)" \
+            NO_TCLTK=YesPlease NO_MAN=YesPlease \
+            prefix=/usr gitexecdir=/usr/lib/git-core all
+
+          package="$GITHUB_WORKSPACE/package"
+          mkdir -p "$package"
+          make -C "$GITHUB_WORKSPACE/git-source" \
+            NO_TCLTK=YesPlease NO_MAN=YesPlease \
+            prefix=/usr gitexecdir=/usr/lib/git-core \
+            DESTDIR="$package" install
+
+          split_packages="$(mktemp -d)"
+          (
+            cd "$split_packages"
+            apt-get download git-cvs git-email git-mediawiki git-svn
+            for archive in ./*.deb; do
+              while IFS= read -r path; do
+                if [[ "$path" != */ ]]; then
+                  rm -f -- "$package/${path#./}"
+                fi
+              done < <(dpkg-deb --fsys-tarfile "$archive" | tar -tf -)
+            done
+          )
+          rm -rf "$package/usr/share/gitweb"
+          find "$package" -depth -type d -empty -delete
+
+          mkdir -p "$package/DEBIAN" "$GITHUB_WORKSPACE/dist"
+          cat > "$package/DEBIAN/control" <<EOF
+          Package: git
+          Version: 1:${VERSION}-1
+          Section: vcs
+          Priority: optional
+          Architecture: ${DEB_ARCH}
+          Maintainer: git-debian-binary contributors
+          Depends: git-man, libc6 (>= 2.38), libcurl3t64-gnutls (>= 7.56.1), liberror-perl, libexpat1 (>= 2.0.1), libpcre2-8-0 (>= 10.34), libssl3t64, perl, zlib1g (>= 1:1.2.2)
+          Description: Fast, scalable, distributed revision control system
+           Upstream Git built from source for Debian 13.
+          EOF
+          dpkg-deb --build --root-owner-group "$package" \
+            "$GITHUB_WORKSPACE/dist/git_${VERSION}_${DEB_ARCH}.deb"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: git-deb-${{ matrix.arch }}
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [resolve-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: git-deb-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$VERSION" dist/*.deb \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$VERSION" dist/*.deb \
+              --repo "$GITHUB_REPOSITORY" --title "$VERSION" --generate-notes
+          fi
